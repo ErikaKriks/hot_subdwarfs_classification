@@ -1,4 +1,4 @@
-# Karštųjų subnykštukių dvinarių sistemas klasifikavimas naudojant Gaia DR3 XP spektrų duomenis
+# Karštųjų subnykštukių dvinarių sistemų klasifikavimas naudojant Gaia DR3 XP spektrų duomenis
 
 Bakalauro darbo (Duomenų mokslas, VU MIF) kodo aplankas. 
 Projekto tikslas —klasifikuoti karštųjų subnykštukių (hot subdwarf) žvaigždžių dvinares sistemas
