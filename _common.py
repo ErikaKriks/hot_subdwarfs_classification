@@ -131,6 +131,43 @@ def flatten_feature_blocks(
     return out
 
 
+def flatten_feature_blocks_asym(
+    source_ids: Iterable[int],
+    labels: Iterable[int],
+    bp_coeffs: np.ndarray,
+    rp_coeffs: np.ndarray,
+) -> pd.DataFrame:
+    """Flatten BP/RP coefficient blocks allowing K_BP != K_RP."""
+    bp_coeffs = np.asarray(bp_coeffs, dtype=float)
+    rp_coeffs = np.asarray(rp_coeffs, dtype=float)
+    if bp_coeffs.shape[0] != rp_coeffs.shape[0]:
+        raise ValueError(
+            f"Row count mismatch: BP {bp_coeffs.shape[0]} vs RP {rp_coeffs.shape[0]}."
+        )
+    total_cols = bp_coeffs.shape[1] + rp_coeffs.shape[1]
+    columns = [f"c{i:03d}" for i in range(total_cols)]
+    stacked = np.hstack([bp_coeffs, rp_coeffs])
+    out = pd.DataFrame(stacked, columns=columns)
+    out.insert(0, "y", np.asarray(list(labels), dtype=int))
+    out.insert(0, "source_id", np.asarray(list(source_ids)))
+    return out
+
+
+def json_safe(value):
+    """Convert NumPy-heavy values into JSON-serializable Python objects."""
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return round(float(value), 6)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    return value
+
+
 def load_split_records() -> list[dict]:
     if not LOCAL_SPLITS.exists():
         raise FileNotFoundError(

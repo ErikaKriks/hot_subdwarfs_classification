@@ -21,11 +21,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 import warnings
 from collections import Counter
-from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 import numpy as np
@@ -45,20 +43,17 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 ROOT = Path(__file__).resolve().parent
-sys.modules.pop("bp_basis_step02", None)
-_spec = spec_from_file_location("bp_basis_step02", ROOT / "02_generate_basis_features.py")
-step02 = module_from_spec(_spec)
-assert _spec.loader is not None
-sys.modules[_spec.name] = step02
-_spec.loader.exec_module(step02)
+from _exp08_shared import generate_features, load_step02  # noqa: E402
 
 from _common import (  # noqa: E402
     BP_SAMPLED_CSV,
     DATA_DIR,
     RESULTS_DIR,
     RP_SAMPLED_CSV,
-    l2_normalize,
+    json_safe,
 )
+
+step02 = load_step02(ROOT)
 
 RANDOM_STATE = 42
 REPRESENTATIVE_K = [3, 8, 15, 20]
@@ -89,39 +84,6 @@ def parse_args() -> argparse.Namespace:
                    help="Restrict LR HPO to a single penalty (default: both). "
                         "Use 'l2' to study ridge behaviour for correlated bases.")
     return p.parse_args()
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Feature generation (same as grid scripts)
-# ═══════════════════════════════════════════════════════════════════════
-
-def flatten_feature_blocks_asym(source_ids, labels, bp_coeffs, rp_coeffs):
-    bp_coeffs = np.asarray(bp_coeffs, dtype=float)
-    rp_coeffs = np.asarray(rp_coeffs, dtype=float)
-    if bp_coeffs.shape[0] != rp_coeffs.shape[0]:
-        raise ValueError(
-            f"Row count mismatch: BP {bp_coeffs.shape[0]} vs RP {rp_coeffs.shape[0]}"
-        )
-    total_cols = bp_coeffs.shape[1] + rp_coeffs.shape[1]
-    columns = [f"c{i:03d}" for i in range(total_cols)]
-    stacked = np.hstack([bp_coeffs, rp_coeffs])
-    out = pd.DataFrame(stacked, columns=columns)
-    out.insert(0, "y", np.asarray(labels, dtype=int))
-    out.insert(0, "source_id", np.asarray(source_ids))
-    return out
-
-
-def generate_features(bp, rp, basis, K_BP, K_RP):
-    bp_fit = step02.build_block_fit(bp, basis, "none", K_BP)
-    rp_fit = step02.build_block_fit(rp, basis, "none", K_RP)
-    feat_df = flatten_feature_blocks_asym(
-        bp.source_ids, bp.labels, bp_fit.coeffs, rp_fit.coeffs,
-    )
-    coeff_cols = [c for c in feat_df.columns if c.startswith("c")]
-    feat_df = l2_normalize(feat_df, coeff_cols=coeff_cols)
-    X = feat_df[coeff_cols].to_numpy(dtype=np.float64)
-    y = feat_df["y"].astype(int).to_numpy()
-    return X, y
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -267,20 +229,6 @@ def run_hpo_xgb(X_tr, y_tr, n_trials, timeout, n_jobs):
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-def _json_safe(v):
-    if isinstance(v, np.bool_):
-        return bool(v)
-    if isinstance(v, np.integer):
-        return int(v)
-    if isinstance(v, np.floating):
-        return round(float(v), 6)
-    if isinstance(v, np.ndarray):
-        return v.tolist()
-    if isinstance(v, dict):
-        return {k: _json_safe(val) for k, val in v.items()}
-    return v
-
-
 def print_param_stability(all_params, clf_name):
     """Print frequency of each parameter value across all HPO results."""
     if not all_params:
@@ -309,7 +257,7 @@ def print_param_stability(all_params, clf_name):
         suggested[pname] = most_common_val
 
     print(f"\n  Suggested fixed params:")
-    print(f"  {json.dumps({k: _json_safe(v) for k, v in suggested.items()}, indent=2)}")
+    print(f"  {json.dumps({k: json_safe(v) for k, v in suggested.items()}, indent=2)}")
     print()
 
     return suggested
@@ -375,7 +323,7 @@ def main():
 
     for k in k_values:
         t_feat = time.time()
-        X, y = generate_features(bp, rp, basis, k, k)
+        X, y = generate_features(step02, bp, rp, basis, k, k)
         feat_s = time.time() - t_feat
         print(f"\n  >> K_BP={k} K_RP={k} {basis} -> {X.shape[1]}D "
               f"({X.shape[0]} samples) in {feat_s:.1f}s")
@@ -407,7 +355,7 @@ def main():
 
             done += 1
             all_best_params.append(best_params)
-            params_json = json.dumps({k2: _json_safe(v)
+            params_json = json.dumps({k2: json_safe(v)
                                       for k2, v in best_params.items()})
 
             row = {
@@ -450,7 +398,7 @@ def main():
     print(f"Results saved to: {raw_csv}")
     print(f"\nTo use fixed params in the grid sweep:")
     if suggested:
-        safe_params = {k2: _json_safe(v) for k2, v in suggested.items()}
+        safe_params = {k2: json_safe(v) for k2, v in suggested.items()}
         params_str = json.dumps(safe_params)
         script_map = {
             "RF": "08_kbp_krp_grid_rf.py",

@@ -45,23 +45,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 import warnings
-from importlib.util import module_from_spec, spec_from_file_location
 from itertools import groupby
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.stats import loguniform, uniform
-from sklearn.metrics import (
-    average_precision_score,
-    brier_score_loss,
-    confusion_matrix,
-    log_loss,
-    roc_auc_score,
-)
 from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedKFold,
@@ -74,20 +65,26 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
 
 ROOT = Path(__file__).resolve().parent
-sys.modules.pop("bp_basis_step02", None)
-_spec = spec_from_file_location("bp_basis_step02", ROOT / "02_generate_basis_features.py")
-step02 = module_from_spec(_spec)
-assert _spec.loader is not None
-sys.modules[_spec.name] = step02
-_spec.loader.exec_module(step02)
+from _exp08_shared import (  # noqa: E402
+    all_threshold_methods_done,
+    evaluate,
+    generate_features,
+    load_completed,
+    load_step02,
+    pick_f1_threshold,
+    pick_youden_threshold,
+    print_pr_auc_summary,
+)
 
 from _common import (  # noqa: E402
     BP_SAMPLED_CSV,
     DATA_DIR,
     RESULTS_DIR,
     RP_SAMPLED_CSV,
-    l2_normalize,
+    json_safe,
 )
+
+step02 = load_step02(ROOT)
 
 RANDOM_STATE = 42
 CLF_NAME = "XGB"
@@ -143,101 +140,6 @@ def parse_args() -> argparse.Namespace:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Feature generation
-# ═══════════════════════════════════════════════════════════════════════
-
-def flatten_feature_blocks_asym(
-    source_ids: np.ndarray,
-    labels: np.ndarray,
-    bp_coeffs: np.ndarray,
-    rp_coeffs: np.ndarray,
-) -> pd.DataFrame:
-    """Like _common.flatten_feature_blocks but allows K_BP != K_RP."""
-    bp_coeffs = np.asarray(bp_coeffs, dtype=float)
-    rp_coeffs = np.asarray(rp_coeffs, dtype=float)
-    if bp_coeffs.shape[0] != rp_coeffs.shape[0]:
-        raise ValueError(
-            f"Row count mismatch: BP {bp_coeffs.shape[0]} vs RP {rp_coeffs.shape[0]}"
-        )
-    total_cols = bp_coeffs.shape[1] + rp_coeffs.shape[1]
-    columns = [f"c{i:03d}" for i in range(total_cols)]
-    stacked = np.hstack([bp_coeffs, rp_coeffs])
-    out = pd.DataFrame(stacked, columns=columns)
-    out.insert(0, "y", np.asarray(labels, dtype=int))
-    out.insert(0, "source_id", np.asarray(source_ids))
-    return out
-
-
-def generate_features(bp, rp, basis: str, K_BP: int, K_RP: int):
-    """Fit basis separately for BP/RP, concatenate, L2-normalise."""
-    bp_fit = step02.build_block_fit(bp, basis, "none", K_BP)
-    rp_fit = step02.build_block_fit(rp, basis, "none", K_RP)
-    feat_df = flatten_feature_blocks_asym(
-        bp.source_ids, bp.labels, bp_fit.coeffs, rp_fit.coeffs,
-    )
-    coeff_cols = [c for c in feat_df.columns if c.startswith("c")]
-    feat_df = l2_normalize(feat_df, coeff_cols=coeff_cols)
-    X = feat_df[coeff_cols].to_numpy(dtype=np.float64)
-    y = feat_df["y"].astype(int).to_numpy()
-    return X, y
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Evaluation helpers
-# ═══════════════════════════════════════════════════════════════════════
-
-def pick_youden_threshold(y_true, y_prob, grid_size=200):
-    thresholds = np.linspace(0, 1, grid_size)
-    best_j, best_thr = -1.0, 0.5
-    for thr in thresholds:
-        y_pred = (y_prob >= thr).astype(int)
-        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
-        sens = tp / (tp + fn) if (tp + fn) else 0.0
-        spec = tn / (tn + fp) if (tn + fp) else 0.0
-        j = sens + spec - 1.0
-        if j > best_j:
-            best_j, best_thr = j, float(thr)
-    return best_thr
-
-
-def pick_f1_threshold(y_true, y_prob, grid_size=200):
-    thresholds = np.linspace(0, 1, grid_size)
-    best_f1, best_thr = -1.0, 0.5
-    for thr in thresholds:
-        y_pred = (y_prob >= thr).astype(int)
-        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
-        prec = tp / (tp + fp) if (tp + fp) else 0.0
-        rec = tp / (tp + fn) if (tp + fn) else 0.0
-        f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) else 0.0
-        if f1 > best_f1:
-            best_f1, best_thr = f1, float(thr)
-    return best_thr
-
-
-def evaluate(y_true, y_prob, threshold):
-    y_pred = (y_prob >= threshold).astype(int)
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
-    sens = tp / (tp + fn) if (tp + fn) else 0.0
-    spec = tn / (tn + fp) if (tn + fp) else 0.0
-    prec = tp / (tp + fp) if (tp + fp) else 0.0
-    acc = (tp + tn) / (tp + tn + fp + fn)
-    f1 = (2 * prec * sens) / (prec + sens) if (prec + sens) else 0.0
-    return {
-        "threshold": threshold,
-        "sensitivity": sens,
-        "specificity": spec,
-        "precision": prec,
-        "accuracy": acc,
-        "f1": f1,
-        "youden_j": sens + spec - 1.0,
-        "roc_auc": roc_auc_score(y_true, y_prob),
-        "pr_auc": average_precision_score(y_true, y_prob),
-        "brier": brier_score_loss(y_true, y_prob),
-        "log_loss": log_loss(y_true, y_prob),
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════
 # Classifier runners
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -280,7 +182,7 @@ def run_xgb(X_tr, y_tr, X_te, y_te, n_jobs: int):
     metrics_f1 = evaluate(y_te, y_prob_te, thr_f1)
 
     best_params = {k.replace("clf__", ""): v for k, v in search.best_params_.items()}
-    params_json = json.dumps({k: _json_safe(v) for k, v in best_params.items()})
+    params_json = json.dumps({k: json_safe(v) for k, v in best_params.items()})
 
     for m in (metrics_youden, metrics_f1):
         m["best_cv_roc_auc"] = search.best_score_
@@ -313,7 +215,7 @@ def run_xgb_fixed(X_tr, y_tr, X_te, y_te, fixed_params, n_jobs):
     metrics_youden = evaluate(y_te, y_prob_te, thr_youden)
     metrics_f1 = evaluate(y_te, y_prob_te, thr_f1)
 
-    params_json = json.dumps({k: _json_safe(v) for k, v in fixed_params.items()})
+    params_json = json.dumps({k: json_safe(v) for k, v in fixed_params.items()})
 
     for m in (metrics_youden, metrics_f1):
         m["best_cv_roc_auc"] = float("nan")
@@ -325,53 +227,12 @@ def run_xgb_fixed(X_tr, y_tr, X_te, y_te, fixed_params, n_jobs):
     return metrics_youden, metrics_f1
 
 
-def _json_safe(v):
-    if isinstance(v, np.bool_):
-        return bool(v)
-    if isinstance(v, np.integer):
-        return int(v)
-    if isinstance(v, np.floating):
-        return round(float(v), 6)
-    if isinstance(v, np.ndarray):
-        return v.tolist()
-    if isinstance(v, dict):
-        return {k: _json_safe(val) for k, val in v.items()}
-    return v
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # Resume support
 # ═══════════════════════════════════════════════════════════════════════
 
-def load_completed(raw_path: Path) -> set[tuple]:
-    """Return set of (K_BP, K_RP, split, hpo_n_iter, threshold_method) already done."""
-    if not raw_path.exists():
-        return set()
-    try:
-        df = pd.read_csv(raw_path)
-    except pd.errors.EmptyDataError:
-        print(f"  WARNING: {raw_path.name} exists but is empty (0 bytes). "
-              "Treating as fresh start.")
-        return set()
-    if df.empty:
-        return set()
-    if "threshold_method" not in df.columns:
-        return set(
-            df[["K_BP", "K_RP", "split", "hpo_n_iter"]]
-            .itertuples(index=False, name=None)
-        )
-    return set(
-        df[["K_BP", "K_RP", "split", "hpo_n_iter", "threshold_method"]]
-        .itertuples(index=False, name=None)
-    )
-
-
 def _all_threshold_methods_done(completed, k_bp, k_rp, sname, n_iter):
-    """Check whether both threshold rows exist for a cell."""
-    return (
-        (k_bp, k_rp, sname, n_iter, "youden") in completed
-        and (k_bp, k_rp, sname, n_iter, "f1") in completed
-    )
+    return all_threshold_methods_done(completed, k_bp, k_rp, sname, n_iter)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -432,7 +293,7 @@ def main():
     suffix = f"_{args.worker_id}" if args.worker_id else ""
     raw_csv = RESULTS_DIR / f"kbp_krp_grid_{CLF_NAME}_{basis}{suffix}.csv"
 
-    completed = load_completed(raw_csv)
+    completed = load_completed(raw_csv, allow_legacy_without_threshold=True)
     print(f"Already completed: {len(completed)} rows")
 
     if basis == "bspline":
@@ -472,7 +333,7 @@ def main():
     for (k_bp, k_rp), group_iter in groupby(work, key=lambda x: (x[0], x[1])):
         group = list(group_iter)
         t_feat = time.time()
-        X, y = generate_features(bp, rp, basis, k_bp, k_rp)
+        X, y = generate_features(step02, bp, rp, basis, k_bp, k_rp)
         feat_seconds = time.time() - t_feat
         print(f"  >> features: K_BP={k_bp} K_RP={k_rp} {basis} -> "
               f"{X.shape[1]}D ({X.shape[0]} samples) in {feat_seconds:.1f}s",
@@ -542,43 +403,7 @@ def main():
 
 
 def _print_summary(raw_csv: Path) -> None:
-    """Print top-10 (K_BP, K_RP) cells by mean PR-AUC, per threshold method."""
-    if not raw_csv.exists():
-        return
-    df = pd.read_csv(raw_csv)
-    if "pr_auc" not in df.columns:
-        return
-
-    if "threshold_method" in df.columns:
-        for method in df["threshold_method"].unique():
-            sub = df[df["threshold_method"] == method]
-            summary = (
-                sub.groupby(["K_BP", "K_RP"], sort=False)["pr_auc"]
-                .agg(["mean", "std"])
-                .sort_values("mean", ascending=False)
-                .reset_index()
-            )
-            top = summary.head(10)
-            print(f"\n  Top 10 (K_BP, K_RP) by mean PR-AUC  [threshold={method}]"
-                  f"  ({len(summary)} total):")
-            print("  " + "-" * 60)
-            for _, r in top.iterrows():
-                print(f"  K_BP={int(r['K_BP']):3d}  K_RP={int(r['K_RP']):3d}  "
-                      f"PR-AUC = {r['mean']:.4f} +/- {r['std']:.4f}")
-    else:
-        summary = (
-            df.groupby(["K_BP", "K_RP"], sort=False)["pr_auc"]
-            .agg(["mean", "std"])
-            .sort_values("mean", ascending=False)
-            .reset_index()
-        )
-        top = summary.head(10)
-        print(f"\n  Top 10 (K_BP, K_RP) by mean PR-AUC  ({len(summary)} total):")
-        print("  " + "-" * 52)
-        for _, r in top.iterrows():
-            print(f"  K_BP={int(r['K_BP']):3d}  K_RP={int(r['K_RP']):3d}  "
-                  f"PR-AUC = {r['mean']:.4f} +/- {r['std']:.4f}")
-    print()
+    print_pr_auc_summary(raw_csv, allow_legacy_without_threshold=True)
 
 
 if __name__ == "__main__":
