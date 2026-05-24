@@ -1,0 +1,17 @@
+python-dotenv
+requests
+pandas
+numpy
+scipy
+astropy
+pyvo
+jupyter
+gaiaxpy
+matplotlib
+scikit-learn
+xgboost
+optuna
+statsmodels
+seaborn
+plotly
+kaleido

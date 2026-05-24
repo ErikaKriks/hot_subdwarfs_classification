@@ -1,0 +1,22 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Generated outputs
+results/
+figures/
+exports/
+logs/
+*.log
+*.svg
+*.png
+*.pdf
+*.html
+
+# Large/derived data caches
+data/features/
+data/*cache*/
+data/*_raw.csv
