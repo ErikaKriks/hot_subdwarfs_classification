@@ -1,7 +1,7 @@
 # Karštųjų subnykštukių dvinarių sistemų klasifikavimas naudojant Gaia DR3 XP spektrų duomenis
 
 Bakalauro darbo (Duomenų mokslas, VU MIF) kodo aplankas. 
-Projekto tikslas —klasifikuoti karštųjų subnykštukių (hot subdwarf) žvaigždžių dvinares sistemas
+Projekto tikslas – klasifikuoti karštųjų subnykštukių (hot subdwarf) žvaigždžių dvinares sistemas
 naudojant Gaia DR3 BP/RP spektrų bazinių funkcijų plėtinius (Chebyshev, Legendre,
 B-spline) bei mašininio mokymo metodus. 
 Etaloninis darbas: Ambrosch et al. (2026),
@@ -51,16 +51,16 @@ pip install -r requirements.txt
 
 Aplanke `data/` turi būti:
 
-- `bp_sampled_spectra.csv` — BP spektrai
-- `rp_sampled_spectra.csv` — RP spektrai
-- `splits.json` — pagrindinis kryžminio patikrinimo skaidinys
-- `splits_rskf.json` — pakartotinio stratifikuoto K-fold skaidinys (50 padalijimų)
+- `bp_sampled_spectra.csv` – BP spektrai
+- `rp_sampled_spectra.csv` – RP spektrai
+- `splits.json` – pagrindinis kryžminio patikrinimo skaidinys
+- `splits_rskf.json` – pakartotinio stratifikuoto K-fold skaidinys (50 padalijimų)
 
 ## Vykdymo seka
 
-1. *(neprivaloma)* `01_prepare_inputs.py`  — jei reikia persigeneruoti įvestis.
-2. `02_generate_basis_features.py` — bazinių funkcijų plėtinių požymių paruošimas.
-3. `08_hpo_preliminary.py` — preliminari hiperparametrų paieška.
+1. *(neprivaloma)* `01_prepare_inputs.py`  – jei reikia persigeneruoti įvestis.
+2. `02_generate_basis_features.py` – bazinių funkcijų plėtinių požymių paruošimas.
+3. `08_hpo_preliminary.py` – preliminari hiperparametrų paieška.
 4. Pagrindiniai (K_BP × K_RP) gardelės eksperimentai:
    - `08_kbp_krp_grid_lr.py`
    - `08_kbp_krp_grid_rf.py`

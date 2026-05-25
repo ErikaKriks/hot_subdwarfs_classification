@@ -1,50 +1,14 @@
 #!/usr/bin/env python3
-"""Production (K_BP, K_RP) grid sweep — SVM RBF.
+"""SVM RBF grid experiment for one basis
 
-Sweeps all combinations of independent BP and RP polynomial orders on a
-20x20 grid (K_BP, K_RP in 1..20) with no smoothing (sigma=0).  Each run
-processes exactly ONE basis type, making it suitable for parallel dispatch
-across HPC accounts.
+Outputs go to `results/kbp_krp_grid_SVM_{basis}[_{worker-id}].csv`
+Default mode uses fixed params from preliminary HPO
+`--run-hpo` switches to per-cell Optuna
+Probabilities are calibrated (Platt scaling) and both thresholds are saved
 
-By default, uses FIXED hyperparameters (per-basis) determined via
-preliminary HPO (08_hpo_preliminary.py).  Pass --run-hpo to revert to
-per-cell Optuna search, or --fixed-params '{"key":val,...}' to override.
-
-SVM is trained with probability=False for speed, then wrapped in
-CalibratedClassifierCV (sigmoid / Platt scaling, 3-fold) for
-well-calibrated probability estimates.
-
-Threshold selection: each cell is evaluated twice — once with the
-Youden-J-optimal threshold and once with the F1-optimal threshold, both
-derived from out-of-fold training predictions.
-
-Run conventions:
-    - Each (classifier, basis) pair is one standalone run, intended to be
-      assigned to exactly one worker/account.
-    - Workers never share output files.  If two workers must run the same
-      (classifier, basis) pair (e.g. to split K_BP ranges), use --worker-id
-      to disambiguate and split the K_BP list between them.  Merge CSVs
-      manually afterwards.
-    - All workers MUST use identical splits_rskf.json.  Verify by comparing
-      file hashes before distributing.
-
-Grid (defaults):
-    K_BP       : 1, 2, ..., 20
-    K_RP       : 1, 2, ..., 20
-    basis      : one of chebyshev, legendre, bspline  (CLI arg, required)
-    classifier : SVM  (hard-coded)
-    splits     : all 50 from splits_rskf.json (--smoke for rep0 only)
-    sigma      : 0 (no smoothing)
-
-Outputs:
-    results/kbp_krp_grid_SVM_{basis}[_{worker-id}].csv
-
-Usage:
+Examples:
     python 08_kbp_krp_grid_svm.py --basis chebyshev
-    python 08_kbp_krp_grid_svm.py --basis legendre --smoke
-    python 08_kbp_krp_grid_svm.py --basis bspline \\
-           --k-bp-values 1 2 3 4 5 --worker-id w1
-    python 08_kbp_krp_grid_svm.py --basis chebyshev --n-trials 80 --timeout 600
+    python 08_kbp_krp_grid_svm.py --basis chebyshev --smoke
 """
 from __future__ import annotations
 
@@ -100,8 +64,8 @@ N_TRIALS_DEFAULT = 50
 OPTUNA_TIMEOUT_DEFAULT = 300
 BSPLINE_MIN_K = 4
 
-# Fixed hyperparameters from preliminary HPO (08_hpo_preliminary.py, 100 trials).
-# Per-basis because bspline has distinctly different optimal C/gamma.
+# Fixed hyperparameters from preliminary HPO (08_hpo_preliminary.py, 100 trials)
+# Per-basis because bspline has distinctly different optimal C/gamma
 FIXED_PARAMS_SVM = {
     "chebyshev": {"C": 10, "gamma": 0.001, "class_weight": "balanced"},
     "legendre":  {"C": 10, "gamma": 0.001, "class_weight": "balanced"},
@@ -109,9 +73,7 @@ FIXED_PARAMS_SVM = {
 }
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════
+# CLI options
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -152,9 +114,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Classifier runner  (SVM RBF, Optuna TPE + CalibratedClassifierCV)
-# ═══════════════════════════════════════════════════════════════════════
+# SVM routine
 
 def _svm_pipeline(**kwargs):
     return Pipeline([
@@ -176,6 +136,7 @@ def _svm_param_fn(trial):
 
 def run_svm(X_tr, y_tr, X_te, y_te, n_trials, timeout, n_jobs):
     """SVM RBF with Optuna TPE + CalibratedClassifierCV for probabilities."""
+    # CV optimizes ranking quality before probability calibration
     inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
 
     def objective(trial):
@@ -189,6 +150,7 @@ def run_svm(X_tr, y_tr, X_te, y_te, n_trials, timeout, n_jobs):
 
     sampler = optuna.samplers.TPESampler(seed=RANDOM_STATE)
     study = optuna.create_study(direction="maximize", sampler=sampler)
+    # Stop at n_trials or timeout, whichever comes first
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
 
     best_params = study.best_trial.params
@@ -196,11 +158,13 @@ def run_svm(X_tr, y_tr, X_te, y_te, n_trials, timeout, n_jobs):
     best_pipe = _svm_pipeline(**best_params)
     best_pipe.fit(X_tr, y_tr)
 
+    # Calibrate probabilities after selecting best raw SVM
     cal_pipe = CalibratedClassifierCV(
         best_pipe, cv=3, method="sigmoid", n_jobs=n_jobs,
     )
     cal_pipe.fit(X_tr, y_tr)
 
+    # Calibrated OOF probs are used only for threshold tuning
     oof_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
     y_prob_oof = cross_val_predict(
         cal_pipe, X_tr, y_tr, cv=oof_cv,
@@ -229,9 +193,11 @@ def run_svm(X_tr, y_tr, X_te, y_te, n_trials, timeout, n_jobs):
 
 def run_svm_fixed(X_tr, y_tr, X_te, y_te, fixed_params, n_jobs):
     """SVM with pre-determined hyperparameters — no HPO, calibrated probabilities."""
+    # No Optuna in fixed mode, but still calibrate probabilities
     best_pipe = _svm_pipeline(**fixed_params)
     best_pipe.fit(X_tr, y_tr)
 
+    # Keep behavior aligned with HPO mode
     cal_pipe = CalibratedClassifierCV(
         best_pipe, cv=3, method="sigmoid", n_jobs=n_jobs,
     )
@@ -263,17 +229,13 @@ def run_svm_fixed(X_tr, y_tr, X_te, y_te, fixed_params, n_jobs):
     return metrics_youden, metrics_f1
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Resume support
-# ═══════════════════════════════════════════════════════════════════════
+# Resume utilities
 
 def _all_threshold_methods_done(completed, k_bp, k_rp, sname, n_trials):
     return all_threshold_methods_done(completed, k_bp, k_rp, sname, n_trials)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════
+# Main execution
 
 def main():
     args = parse_args()
@@ -283,13 +245,17 @@ def main():
     n_jobs = args.n_jobs
 
     if args.run_hpo:
+        # Per-cell Optuna search path
         fixed_params = None
     elif args.fixed_params is not None:
+        # One-off override from CLI JSON
         fixed_params = json.loads(args.fixed_params)
     else:
+        # Basis-specific defaults from preliminary search
         fixed_params = FIXED_PARAMS_SVM[basis]
 
     if args.smoke:
+        # Smoke mode trims Optuna budget to finish quickly
         n_trials = 5
         timeout = 60
     else:
@@ -309,6 +275,7 @@ def main():
 
     bp = step02.load_block(BP_SAMPLED_CSV)
     rp = step02.load_block(RP_SAMPLED_CSV)
+    # Consistency guard: BP/RP alignment must hold before feature generation
     step02.check_alignment(bp, rp)
     print(f"BP shape: {bp.flux.shape}")
     print(f"RP shape: {rp.flux.shape}")
@@ -323,6 +290,7 @@ def main():
         all_splits = json.load(fh)
 
     if args.smoke:
+        # Keep smoke mode to one repetition (čia tik greitas prasukimas)
         splits_dict = {k: v for k, v in all_splits.items()
                        if k.startswith("rep0_")}
         print(f"Splits: {len(splits_dict)} (rep0 only)")
@@ -339,6 +307,7 @@ def main():
     print(f"Already completed: {len(completed)} rows")
 
     if completed:
+        # Make mixed-budget runs explicit; easy to miss otherwise
         existing_budgets = {t[3] for t in completed}
         foreign = existing_budgets - {n_trials}
         if foreign:
@@ -371,6 +340,7 @@ def main():
                   f"Dropped {skipped_bp} K_BP and {skipped_rp} K_RP values.")
 
     work = []
+    # One work item = (K_BP, K_RP, split)
     for k_bp in k_bp_values:
         for k_rp in k_rp_values:
             for sname in split_names:
@@ -380,9 +350,11 @@ def main():
     total = len(work)
     print(f"Remaining work: {total} cells")
     print(f"Grid: K_BP={k_bp_values}, K_RP={k_rp_values}")
+    # If this line looks odd, usually CLI args or bspline filtering is wrong
     print()
 
     if total == 0:
+        # Edge case: if resume says done, exit cleanly
         print("Nothing to do.")
         _print_summary(raw_csv)
         return
@@ -396,6 +368,7 @@ def main():
     work.sort(key=lambda x: (x[0], x[1]))
     for (k_bp, k_rp), group_iter in groupby(work, key=lambda x: (x[0], x[1])):
         group = list(group_iter)
+        # Cache features for this K pair across all folds
         t_feat = time.time()
         X, y = generate_features(step02, bp, rp, basis, k_bp, k_rp)
         feat_seconds = time.time() - t_feat
@@ -405,6 +378,7 @@ def main():
 
         for (_, _, sname) in group:
             split = splits_dict[sname]
+            # Split arrays index into the cached feature matrix
             train_idx = np.asarray(split["train"], dtype=int)
             test_idx = np.asarray(split["test"], dtype=int)
             X_tr, y_tr = X[train_idx], y[train_idx]
@@ -423,6 +397,7 @@ def main():
             cell_times.append(cell_seconds)
 
             for metrics in (metrics_youden, metrics_f1):
+                # Save both threshold policies for later comparison
                 row = {
                     "K_BP": k_bp,
                     "K_RP": k_rp,
@@ -441,6 +416,7 @@ def main():
 
             done += 1
             elapsed = time.time() - t_start
+            # Running ETA from observed per-cell durations
             avg_cell = np.mean(cell_times)
             eta = avg_cell * (total - done)
 

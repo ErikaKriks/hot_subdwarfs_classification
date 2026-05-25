@@ -60,9 +60,7 @@ REPRESENTATIVE_K = [3, 8, 15, 20]
 BSPLINE_MIN_K = 4
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════
+# CLI args
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -86,9 +84,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# RF HPO (OOB-based, same as 08_kbp_krp_grid_rf.py)
-# ═══════════════════════════════════════════════════════════════════════
+# RF HPO (OOB-based)
 
 def _rf_param_fn(trial):
     return {
@@ -110,18 +106,18 @@ def run_hpo_rf(X_tr, y_tr, n_trials, timeout):
             random_state=RANDOM_STATE, n_jobs=-1, **params,
         )
         clf.fit(X_tr, y_tr)
+        # RF gets OOB predictions "for free", so we skip extra CV
         y_oob = clf.oob_decision_function_[:, 1]
         return roc_auc_score(y_tr, y_oob)
 
     sampler = optuna.samplers.TPESampler(seed=RANDOM_STATE)
     study = optuna.create_study(direction="maximize", sampler=sampler)
+    # Shared Optuna budget for this (K, split) cell
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
     return study.best_trial.params, study.best_value
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# SVM HPO (CV-based, same as 08_kbp_krp_grid_svm.py)
-# ═══════════════════════════════════════════════════════════════════════
+# SVM HPO (CV-based)
 
 def _svm_param_fn(trial):
     return {
@@ -132,6 +128,7 @@ def _svm_param_fn(trial):
 
 
 def run_hpo_svm(X_tr, y_tr, n_trials, timeout, n_jobs):
+    # Standard 3-fold CV objective for SVM/LR/XGB
     inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
 
     def objective(trial):
@@ -153,9 +150,7 @@ def run_hpo_svm(X_tr, y_tr, n_trials, timeout, n_jobs):
     return study.best_trial.params, study.best_value
 
 
-# ═══════════════════════════════════════════════════════════════════════
 # LR HPO (CV-based)
-# ═══════════════════════════════════════════════════════════════════════
 
 def _lr_param_fn(trial, penalty_choices=("l1", "l2")):
     return {
@@ -189,9 +184,7 @@ def run_hpo_lr(X_tr, y_tr, n_trials, timeout, n_jobs, penalty_choices=("l1", "l2
     return study.best_trial.params, study.best_value
 
 
-# ═══════════════════════════════════════════════════════════════════════
 # XGB HPO (CV-based)
-# ═══════════════════════════════════════════════════════════════════════
 
 def _xgb_param_fn(trial):
     return {
@@ -225,9 +218,7 @@ def run_hpo_xgb(X_tr, y_tr, n_trials, timeout, n_jobs):
     return study.best_trial.params, study.best_value
 
 
-# ═══════════════════════════════════════════════════════════════════════
 # Helpers
-# ═══════════════════════════════════════════════════════════════════════
 
 def print_param_stability(all_params, clf_name):
     """Print frequency of each parameter value across all HPO results."""
@@ -243,6 +234,7 @@ def print_param_stability(all_params, clf_name):
 
     suggested = {}
     for pname in param_names:
+        # Frequency table helps decide if one fixed value is robust
         values = [p[pname] for p in all_params]
         counts = Counter(values)
         most_common_val, most_common_count = counts.most_common(1)[0]
@@ -263,9 +255,7 @@ def print_param_stability(all_params, clf_name):
     return suggested
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════
+# Main loop
 
 def main():
     args = parse_args()
@@ -291,6 +281,7 @@ def main():
 
     bp = step02.load_block(BP_SAMPLED_CSV)
     rp = step02.load_block(RP_SAMPLED_CSV)
+    # Quick guard: fail fast if BP and RP sources drift apart
     step02.check_alignment(bp, rp)
 
     splits_path = DATA_DIR / "splits_rskf.json"
@@ -306,6 +297,7 @@ def main():
 
     k_values = REPRESENTATIVE_K
     if basis == "bspline":
+        # Cubic B-spline basis is not valid for very small K
         k_values = [k for k in k_values if k >= BSPLINE_MIN_K]
         print(f"  bspline: K values adjusted to {k_values}")
 
@@ -313,6 +305,7 @@ def main():
         raw_csv = RESULTS_DIR / f"hpo_preliminary_{clf}_{basis}_{lr_penalty}.csv"
     else:
         raw_csv = RESULTS_DIR / f"hpo_preliminary_{clf}_{basis}.csv"
+    # Append rows incrementally so interrupted runs keep partial output
     csv_header_written = False
     all_best_params = []
     rows = []
@@ -323,6 +316,7 @@ def main():
 
     for k in k_values:
         t_feat = time.time()
+        # Generate one symmetric (K_BP=K_RP=K) feature block per K
         X, y = generate_features(step02, bp, rp, basis, k, k)
         feat_s = time.time() - t_feat
         print(f"\n  >> K_BP={k} K_RP={k} {basis} -> {X.shape[1]}D "
@@ -330,6 +324,7 @@ def main():
 
         for sname in split_names:
             split = splits_dict[sname]
+            # Preliminary HPO uses only the training side of each split
             train_idx = np.asarray(split["train"], dtype=int)
             X_tr, y_tr = X[train_idx], y[train_idx]
 
@@ -368,6 +363,7 @@ def main():
             rows.append(row)
 
             row_df = pd.DataFrame([row])
+            # Stream rows to disk so long runs stay resumable
             row_df.to_csv(raw_csv, mode="a",
                           header=not csv_header_written, index=False)
             csv_header_written = True
@@ -381,7 +377,7 @@ def main():
     elapsed_total = time.time() - t_start
     print(f"\nFinished {done} cells in {elapsed_total / 60:.1f} minutes.")
 
-    # Per-K summary
+    # Per-K summary (čia patogu greitai pamatyti trendą)
     df = pd.DataFrame(rows)
     print(f"\n{'=' * 60}")
     print(f"  Per-K summary (mean best_cv_roc_auc across splits)")

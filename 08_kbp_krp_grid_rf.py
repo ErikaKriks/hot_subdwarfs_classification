@@ -1,46 +1,14 @@
 #!/usr/bin/env python3
-"""Production (K_BP, K_RP) grid sweep — Random Forest.
+"""RF grid run for one basis at a time
 
-Sweeps all combinations of independent BP and RP polynomial orders on a
-20x20 grid (K_BP, K_RP in 1..20) with no smoothing (sigma=0).  Each run
-processes exactly ONE basis type, making it suitable for parallel dispatch
-across HPC accounts.
+Writes `results/kbp_krp_grid_RF_{basis}[_{worker-id}].csv`
+Default path uses fixed params from preliminary HPO
+Optional path (`--run-hpo`) uses per-cell Optuna
+Thresholds are selected from OOB probabilities and saved as youden + f1 rows
 
-By default, uses FIXED hyperparameters determined via preliminary HPO
-(08_hpo_preliminary.py).  Pass --run-hpo to revert to per-cell Optuna
-search, or --fixed-params '{"key":val,...}' to override the built-in set.
-
-Threshold selection: each cell is evaluated twice — once with the
-Youden-J-optimal threshold and once with the F1-optimal threshold, both
-derived from out-of-bag training predictions.
-
-Run conventions:
-    - Each (classifier, basis) pair is one standalone run, intended to be
-      assigned to exactly one worker/account.
-    - Workers never share output files.  If two workers must run the same
-      (classifier, basis) pair (e.g. to split K_BP ranges), use --worker-id
-      to disambiguate and split the K_BP list between them.  Merge CSVs
-      manually afterwards.
-    - All workers MUST use identical splits_rskf.json.  Verify by comparing
-      file hashes before distributing.
-
-Grid (defaults):
-    K_BP       : 1, 2, ..., 20
-    K_RP       : 1, 2, ..., 20
-    basis      : one of chebyshev, legendre, bspline  (CLI arg, required)
-    classifier : RF  (hard-coded)
-    splits     : all 50 from splits_rskf.json (--smoke for rep0 only)
-    sigma      : 0 (no smoothing)
-
-Outputs:
-    results/kbp_krp_grid_RF_{basis}[_{worker-id}].csv
-
-Usage:
+Examples:
     python 08_kbp_krp_grid_rf.py --basis chebyshev
-    python 08_kbp_krp_grid_rf.py --basis legendre --smoke
-    python 08_kbp_krp_grid_rf.py --basis bspline \\
-           --k-bp-values 1 2 3 4 5 --worker-id w1
-    python 08_kbp_krp_grid_rf.py --basis chebyshev --n-trials 80 --timeout 600
+    python 08_kbp_krp_grid_rf.py --basis chebyshev --smoke
 """
 from __future__ import annotations
 
@@ -56,6 +24,7 @@ import numpy as np
 import pandas as pd
 import optuna
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 
@@ -90,8 +59,8 @@ N_TRIALS_DEFAULT = 30
 OPTUNA_TIMEOUT_DEFAULT = 300
 BSPLINE_MIN_K = 4
 
-# Fixed hyperparameters from preliminary HPO (08_hpo_preliminary.py, 100 trials).
-# Stable across K values and all 3 bases (55 cells pooled).
+# Fixed hyperparameters from preliminary HPO (08_hpo_preliminary.py, 100 trials)
+# Stable across K values and all 3 bases (55 cells pooled)
 FIXED_PARAMS_RF = {
     "n_estimators": 300,
     "max_depth": 20,
@@ -103,9 +72,7 @@ FIXED_PARAMS_RF = {
 }
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════
+# CLI setup
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -145,17 +112,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Classifier runner  (RF, Optuna TPE + OOB)
-#
-# Random Forest supports out-of-bag (OOB) predictions natively: each
-# tree is trained on a ~63% bootstrap sample, and the remaining ~37%
-# provide free held-out predictions.  This replaces cross-validation
-# both in the Optuna objective (1 fit instead of 3 per trial) and for
-# threshold calibration (0 extra fits), giving roughly 5x speedup
-# over the CV-based approach while being standard practice for
-# bagging ensembles.
-# ═══════════════════════════════════════════════════════════════════════
+# RF model routine
 
 def _rf_model(**kwargs):
     return RandomForestClassifier(
@@ -180,14 +137,17 @@ def run_rf(X_tr, y_tr, X_te, y_te, n_trials, timeout, n_jobs):
     """Random Forest with Optuna TPE, using OOB for validation & thresholds."""
 
     def objective(trial):
+        # Each trial trains one RF and scores OOB ROC-AUC
         params = _rf_param_fn(trial)
         clf = _rf_model(**params)
         clf.fit(X_tr, y_tr)
+        # OOB score is cheap and works well here
         y_oob = clf.oob_decision_function_[:, 1]
         return roc_auc_score(y_tr, y_oob)
 
     sampler = optuna.samplers.TPESampler(seed=RANDOM_STATE)
     study = optuna.create_study(direction="maximize", sampler=sampler)
+    # Budget is controlled by (n_trials, timeout)
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
 
     best_params = study.best_trial.params
@@ -196,6 +156,7 @@ def run_rf(X_tr, y_tr, X_te, y_te, n_trials, timeout, n_jobs):
     best_clf = _rf_model(**best_params)
     best_clf.fit(X_tr, y_tr)
 
+    # Reuse OOB probabilities for threshold selection (no extra CV)
     y_prob_oob = best_clf.oob_decision_function_[:, 1]
     thr_youden = pick_youden_threshold(y_tr, y_prob_oob)
     thr_f1 = pick_f1_threshold(y_tr, y_prob_oob)
@@ -219,6 +180,7 @@ def run_rf(X_tr, y_tr, X_te, y_te, n_trials, timeout, n_jobs):
 
 def run_rf_fixed(X_tr, y_tr, X_te, y_te, fixed_params):
     """RF with pre-determined hyperparameters — no HPO, OOB for thresholds."""
+    # Fixed mode still uses OOB for threshold calibration
     clf = _rf_model(**fixed_params)
     clf.fit(X_tr, y_tr)
 
@@ -243,17 +205,13 @@ def run_rf_fixed(X_tr, y_tr, X_te, y_te, fixed_params):
     return metrics_youden, metrics_f1
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Resume support
-# ═══════════════════════════════════════════════════════════════════════
+# Resume utilities
 
 def _all_threshold_methods_done(completed, k_bp, k_rp, sname, n_trials):
     return all_threshold_methods_done(completed, k_bp, k_rp, sname, n_trials)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════
+# Execution loop
 
 def main():
     args = parse_args()
@@ -263,13 +221,17 @@ def main():
     n_jobs = args.n_jobs
 
     if args.run_hpo:
+        # Per-cell Optuna search
         fixed_params = None
     elif args.fixed_params is not None:
+        # Manual JSON override (patogu greitam testui)
         fixed_params = json.loads(args.fixed_params)
     else:
+        # Default from preliminary HPO
         fixed_params = FIXED_PARAMS_RF
 
     if args.smoke:
+        # Keep smoke runs short regardless of CLI budget
         n_trials = 5
         timeout = 60
     else:
@@ -289,6 +251,7 @@ def main():
 
     bp = step02.load_block(BP_SAMPLED_CSV)
     rp = step02.load_block(RP_SAMPLED_CSV)
+    # Consistency guard: detect BP/RP row drift early
     step02.check_alignment(bp, rp)
     print(f"BP shape: {bp.flux.shape}")
     print(f"RP shape: {rp.flux.shape}")
@@ -303,6 +266,7 @@ def main():
         all_splits = json.load(fh)
 
     if args.smoke:
+        # Only rep0 folds for quick local run-through
         splits_dict = {k: v for k, v in all_splits.items()
                        if k.startswith("rep0_")}
         print(f"Splits: {len(splits_dict)} (rep0 only)")
@@ -319,6 +283,7 @@ def main():
     print(f"Already completed: {len(completed)} rows")
 
     if completed:
+        # Guard against mixing different HPO budgets in one CSV
         existing_budgets = {t[3] for t in completed}
         foreign = existing_budgets - {n_trials}
         if foreign:
@@ -351,6 +316,7 @@ def main():
                   f"Dropped {skipped_bp} K_BP and {skipped_rp} K_RP values.")
 
     work = []
+    # One work item = (K_BP, K_RP, split)
     for k_bp in k_bp_values:
         for k_rp in k_rp_values:
             for sname in split_names:
@@ -360,9 +326,11 @@ def main():
     total = len(work)
     print(f"Remaining work: {total} cells")
     print(f"Grid: K_BP={k_bp_values}, K_RP={k_rp_values}")
+    # Mano praktika: prieš paleidžiant ilgą run dar kartą pasižiūriu šitą eilutę
     print()
 
     if total == 0:
+        # Edge case: no remaining cells means resume is complete
         print("Nothing to do.")
         _print_summary(raw_csv)
         return
@@ -376,6 +344,7 @@ def main():
     work.sort(key=lambda x: (x[0], x[1]))
     for (k_bp, k_rp), group_iter in groupby(work, key=lambda x: (x[0], x[1])):
         group = list(group_iter)
+        # Feature extraction is expensive; reuse across splits
         t_feat = time.time()
         X, y = generate_features(step02, bp, rp, basis, k_bp, k_rp)
         feat_seconds = time.time() - t_feat
@@ -385,6 +354,7 @@ def main():
 
         for (_, _, sname) in group:
             split = splits_dict[sname]
+            # Apply split indices to cached feature matrix
             train_idx = np.asarray(split["train"], dtype=int)
             test_idx = np.asarray(split["test"], dtype=int)
             X_tr, y_tr = X[train_idx], y[train_idx]
@@ -403,6 +373,7 @@ def main():
             cell_times.append(cell_seconds)
 
             for metrics in (metrics_youden, metrics_f1):
+                # Store threshold variants as separate rows
                 row = {
                     "K_BP": k_bp,
                     "K_RP": k_rp,
@@ -421,6 +392,7 @@ def main():
 
             done += 1
             elapsed = time.time() - t_start
+            # ETA from observed cell durations
             avg_cell = np.mean(cell_times)
             eta = avg_cell * (total - done)
 

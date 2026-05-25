@@ -1,45 +1,16 @@
 #!/usr/bin/env python3
-"""Production (K_BP, K_RP) grid sweep — XGBoost.
+"""XGBoost sweep on independent (K_BP, K_RP) cells
 
-Sweeps all combinations of independent BP and RP polynomial orders on a
-20x20 grid (K_BP, K_RP in 1..20) with no smoothing (sigma=0).  Each run
-processes exactly ONE basis type, making it suitable for parallel dispatch
-across HPC accounts.
+Runs one basis per launch and writes
+`results/kbp_krp_grid_XGB_{basis}[_{worker-id}].csv`
 
-By default, uses FIXED hyperparameters (per-basis) determined via
-preliminary HPO (08_hpo_preliminary.py).  Pass --run-hpo to revert to
-per-cell RandomizedSearchCV, or --fixed-params '{"key":val,...}' to
-override the built-in set.
+Uses fixed params by default
+`--run-hpo` enables per-cell RandomizedSearchCV
+Each cell emits two rows: youden and f1 threshold policies
 
-Threshold selection: each cell is evaluated twice — once with the
-Youden-J-optimal threshold and once with the F1-optimal threshold, both
-derived from out-of-fold training predictions.
-
-Run conventions:
-    - Each (classifier, basis) pair is one standalone run, intended to be
-      assigned to exactly one worker/account.
-    - Workers never share output files.  If two workers must run the same
-      (classifier, basis) pair (e.g. to split K_BP ranges), use --worker-id
-      to disambiguate and split the K_BP list between them.  Merge CSVs
-      manually afterwards.
-    - All workers MUST use identical splits_rskf.json.  Verify by comparing
-      file hashes before distributing.
-
-Grid (defaults):
-    K_BP       : 1, 2, ..., 20
-    K_RP       : 1, 2, ..., 20
-    basis      : one of chebyshev, legendre, bspline  (CLI arg, required)
-    classifier : XGB  (hard-coded)
-    splits     : all 50 from splits_rskf.json (--smoke for rep0 only)
-    sigma      : 0 (no smoothing)
-
-Outputs:
-    results/kbp_krp_grid_XGB_{basis}[_{worker-id}].csv
-
-Usage:
+Examples:
     python 08_kbp_krp_grid_xgb.py --basis chebyshev
-    python 08_kbp_krp_grid_xgb.py --basis legendre --smoke
-    python 08_kbp_krp_grid_xgb.py --basis chebyshev --run-hpo
+    python 08_kbp_krp_grid_xgb.py --basis chebyshev --smoke
 """
 from __future__ import annotations
 
@@ -91,9 +62,9 @@ CLF_NAME = "XGB"
 N_ITER = 20
 BSPLINE_MIN_K = 4
 
-# Fixed hyperparameters from preliminary HPO (08_hpo_preliminary.py).
-# Per-basis because optimal params may differ across bases.
-# Placeholder values — will be filled after running preliminary HPO.
+# Fixed hyperparameters from preliminary HPO (08_hpo_preliminary.py)
+# Per-basis because optimal params may differ across bases
+# Placeholder values — will be filled after running preliminary HPO
 FIXED_PARAMS_XGB = {
     "chebyshev": {"n_estimators": 300, "max_depth": 5, "learning_rate": 0.024, "subsample": 0.775, "colsample_bytree": 0.894, "scale_pos_weight": 2},
     "legendre":  {"n_estimators": 100, "max_depth": 4, "learning_rate": 0.028, "subsample": 0.712, "colsample_bytree": 0.876, "scale_pos_weight": 2},
@@ -101,9 +72,7 @@ FIXED_PARAMS_XGB = {
 }
 
 
-# ═══════════════════════════════════════════════════════════════════════
 # CLI
-# ═══════════════════════════════════════════════════════════════════════
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -139,12 +108,11 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Classifier runners
-# ═══════════════════════════════════════════════════════════════════════
+# XGB runner
 
 def run_xgb(X_tr, y_tr, X_te, y_te, n_jobs: int):
     """XGBoost with RandomizedSearchCV (n_iter=20), dual thresholds."""
+    # Inner CV tunes params; XGB estimator itself runs single-threaded
     inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
     pipeline = Pipeline([
         ("clf", XGBClassifier(
@@ -165,9 +133,11 @@ def run_xgb(X_tr, y_tr, X_te, y_te, n_jobs: int):
         scoring="roc_auc", random_state=RANDOM_STATE, n_jobs=n_jobs,
         error_score="raise",
     )
+    # Fit search and keep only the best pipeline
     search.fit(X_tr, y_tr)
     best_pipe = search.best_estimator_
 
+    # Use train OOF probs for thresholds; no peeking at test data
     oof_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
     y_prob_oof = cross_val_predict(
         best_pipe, X_tr, y_tr, cv=oof_cv, method="predict_proba", n_jobs=n_jobs,
@@ -196,12 +166,14 @@ def run_xgb(X_tr, y_tr, X_te, y_te, n_jobs: int):
 
 def run_xgb_fixed(X_tr, y_tr, X_te, y_te, fixed_params, n_jobs):
     """XGB with pre-determined hyperparameters — no HPO, OOF for thresholds."""
+    # Fixed mode keeps thresholding comparable with HPO mode
     clf = XGBClassifier(
         eval_metric="logloss", random_state=RANDOM_STATE,
         n_jobs=1, verbosity=0, **fixed_params,
     )
     clf.fit(X_tr, y_tr)
 
+    # Same threshold routine as HPO mode
     oof_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
     y_prob_oof = cross_val_predict(
         clf, X_tr, y_tr, cv=oof_cv, method="predict_proba", n_jobs=n_jobs,
@@ -227,17 +199,13 @@ def run_xgb_fixed(X_tr, y_tr, X_te, y_te, fixed_params, n_jobs):
     return metrics_youden, metrics_f1
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Resume support
-# ═══════════════════════════════════════════════════════════════════════
+# Resume utilities
 
 def _all_threshold_methods_done(completed, k_bp, k_rp, sname, n_iter):
     return all_threshold_methods_done(completed, k_bp, k_rp, sname, n_iter)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════
+# Run loop
 
 def main():
     args = parse_args()
@@ -248,10 +216,13 @@ def main():
     n_iter = N_ITER
 
     if args.run_hpo:
+        # Enable per-cell RandomizedSearchCV
         fixed_params = None
     elif args.fixed_params is not None:
+        # Optional ad-hoc override from CLI
         fixed_params = json.loads(args.fixed_params)
     else:
+        # Default production params by basis
         fixed_params = FIXED_PARAMS_XGB[basis]
 
     print("=" * 70)
@@ -267,6 +238,7 @@ def main():
 
     bp = step02.load_block(BP_SAMPLED_CSV)
     rp = step02.load_block(RP_SAMPLED_CSV)
+    # Quick guard: ensure both spectral blocks still align row-wise
     step02.check_alignment(bp, rp)
     print(f"BP shape: {bp.flux.shape}")
     print(f"RP shape: {rp.flux.shape}")
@@ -281,6 +253,7 @@ def main():
         all_splits = json.load(fh)
 
     if args.smoke:
+        # Smoke mode runs only rep0 folds
         splits_dict = {k: v for k, v in all_splits.items()
                        if k.startswith("rep0_")}
         print(f"Splits: {len(splits_dict)} (rep0 only)")
@@ -293,6 +266,7 @@ def main():
     suffix = f"_{args.worker_id}" if args.worker_id else ""
     raw_csv = RESULTS_DIR / f"kbp_krp_grid_{CLF_NAME}_{basis}{suffix}.csv"
 
+    # Accept old XGB runs saved before threshold_method was introduced
     completed = load_completed(raw_csv, allow_legacy_without_threshold=True)
     print(f"Already completed: {len(completed)} rows")
 
@@ -307,6 +281,7 @@ def main():
                   f"Dropped {skipped_bp} K_BP and {skipped_rp} K_RP values.")
 
     work = []
+    # One work item = (K_BP, K_RP, split)
     for k_bp in k_bp_values:
         for k_rp in k_rp_values:
             for sname in split_names:
@@ -316,9 +291,11 @@ def main():
     total = len(work)
     print(f"Remaining work: {total} cells")
     print(f"Grid: K_BP={k_bp_values}, K_RP={k_rp_values}")
+    # checking
     print()
 
     if total == 0:
+        # Edge case: resume can leave zero pending cells
         print("Nothing to do.")
         _print_summary(raw_csv)
         return
@@ -332,6 +309,7 @@ def main():
     work.sort(key=lambda x: (x[0], x[1]))
     for (k_bp, k_rp), group_iter in groupby(work, key=lambda x: (x[0], x[1])):
         group = list(group_iter)
+        # Avoid recomputing basis features for each split in the same K pair
         t_feat = time.time()
         X, y = generate_features(step02, bp, rp, basis, k_bp, k_rp)
         feat_seconds = time.time() - t_feat
@@ -341,6 +319,7 @@ def main():
 
         for (_, _, sname) in group:
             split = splits_dict[sname]
+            # Train/test subsets come from precomputed split indices
             train_idx = np.asarray(split["train"], dtype=int)
             test_idx = np.asarray(split["test"], dtype=int)
             X_tr, y_tr = X[train_idx], y[train_idx]
@@ -359,6 +338,7 @@ def main():
             cell_times.append(cell_seconds)
 
             for metrics in (metrics_youden, metrics_f1):
+                # One CSV row per threshold method
                 row = {
                     "K_BP": k_bp,
                     "K_RP": k_rp,
@@ -377,6 +357,7 @@ def main():
 
             done += 1
             elapsed = time.time() - t_start
+            # ETA based on current average cell runtime
             avg_cell = np.mean(cell_times)
             eta = avg_cell * (total - done)
 
