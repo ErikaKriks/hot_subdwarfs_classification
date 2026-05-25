@@ -37,6 +37,8 @@ pip install -r requirements.txt
 
 | Failas | Paskirtis |
 |---|---|
+| `_common.py` | Bendros pagalbinės funkcijos (keliai, normalizacija, BP/RP sujungimas, serializacija) |
+| `_exp08_shared.py` | Bendri `08_*` eksperimentų helperiai (feature generavimas, threshold/evaluate, resume logika) |
 | `01_prepare_inputs.py` / `.ipynb` | Įvesties duomenų paruošimas |
 | `02_generate_basis_features.py` / `.ipynb` | Bazinių funkcijų plėtinių požymių generavimas |
 | `08_hpo_preliminary.py` | Preliminari hiperparametrų paieška |
