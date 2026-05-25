@@ -74,6 +74,7 @@ Aplanke `data/` turi būti:
 Greitas patikrinimas prieš pilną paleidimą:
 
 ```bash
+# Vienas smoke paleidimas dažniausiai pakanka patikrinti, kad pipeline gyvas
 python smoke_07_kbp_krp_grid.py --clf LR --basis chebyshev
 ```
 

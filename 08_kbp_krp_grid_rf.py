@@ -275,6 +275,7 @@ def main():
         print(f"Splits: {len(splits_dict)} (all)")
 
     split_names = sorted(splits_dict.keys())
+    # Sorted split names make resume order deterministic across reruns
 
     suffix = f"_{args.worker_id}" if args.worker_id else ""
     raw_csv = RESULTS_DIR / f"kbp_krp_grid_{CLF_NAME}_{basis}{suffix}.csv"
@@ -326,7 +327,7 @@ def main():
     total = len(work)
     print(f"Remaining work: {total} cells")
     print(f"Grid: K_BP={k_bp_values}, K_RP={k_rp_values}")
-    # Mano praktika: prieš paleidžiant ilgą run dar kartą pasižiūriu šitą eilutę
+    # Quick pre-run glance helps catch wrong grid parameters
     print()
 
     if total == 0:

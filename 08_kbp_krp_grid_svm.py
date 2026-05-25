@@ -175,6 +175,7 @@ def run_svm(X_tr, y_tr, X_te, y_te, n_trials, timeout, n_jobs):
     thr_f1 = pick_f1_threshold(y_tr, y_prob_oof)
 
     y_prob_te = cal_pipe.predict_proba(X_te)[:, 1]
+    # Test probabilities always come from calibrated model for consistency
 
     metrics_youden = evaluate(y_te, y_prob_te, thr_youden)
     metrics_f1 = evaluate(y_te, y_prob_te, thr_f1)
@@ -299,6 +300,7 @@ def main():
         print(f"Splits: {len(splits_dict)} (all)")
 
     split_names = sorted(splits_dict.keys())
+    # Stable split order helps compare logs between local and HPC runs
 
     suffix = f"_{args.worker_id}" if args.worker_id else ""
     raw_csv = RESULTS_DIR / f"kbp_krp_grid_{CLF_NAME}_{basis}{suffix}.csv"

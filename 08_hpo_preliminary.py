@@ -214,6 +214,7 @@ def run_hpo_xgb(X_tr, y_tr, n_trials, timeout, n_jobs):
 
     sampler = optuna.samplers.TPESampler(seed=RANDOM_STATE)
     study = optuna.create_study(direction="maximize", sampler=sampler)
+    # Same Optuna setup as other classifiers keeps results easier to compare
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
     return study.best_trial.params, study.best_value
 
@@ -293,6 +294,7 @@ def main():
     splits_dict = {k: v for k, v in all_splits.items()
                    if k.startswith("rep0_")}
     split_names = sorted(splits_dict.keys())
+    # We intentionally keep rep0 only here for a quick but consistent HPO preview
     print(f"Splits: {len(split_names)} (rep0 only)")
 
     k_values = REPRESENTATIVE_K
