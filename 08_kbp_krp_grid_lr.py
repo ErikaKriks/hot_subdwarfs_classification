@@ -297,7 +297,7 @@ def main():
     total = len(work)
     print(f"Remaining work: {total} cells")
     print(f"Grid: K_BP={k_bp_values}, K_RP={k_rp_values}")
-    # check print
+    # Quick pre-run glance helps catch accidental CLI ranges
     print()
 
     if total == 0:
@@ -306,6 +306,7 @@ def main():
         _print_summary(raw_csv)
         return
 
+    # Continue appending if a partial CSV already exists
     csv_header_written = raw_csv.exists() and raw_csv.stat().st_size > 0
 
     done = 0

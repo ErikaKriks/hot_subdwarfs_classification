@@ -216,5 +216,5 @@ def align_bp_rp_frames(bp_df: pd.DataFrame, rp_df: pd.DataFrame) -> pd.DataFrame
     )
     if merged.empty:
         raise ValueError("BP/RP merge produced no rows. Check source_id and y alignment.")
-    # patikrinimas 
+    # Final guard: merge result must stay non-empty before downstream feature steps
     return merged
